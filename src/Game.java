@@ -83,6 +83,9 @@ class GameEngine implements Engine {
     private List<Card> board = new ArrayList<>();
     private List<Card> opponentBoard = new ArrayList<>();
 
+    private List<Card> graveyard = new ArrayList<>();
+    private List<Card> opponentGraveyard = new ArrayList<>();
+
     public GameEngine(List<Card> deck) {
         this.deck = deck;
     }
@@ -135,7 +138,10 @@ class GameEngine implements Engine {
 
     private List<Action> bestAttackAction(Round round) {
         List<Action> actionList = new ArrayList<>();
-
+        // Banzai !
+        for (Card card : board) {
+            actionList.add(new Attack(card.instanceId));
+        }
         return actionList;
     }
 
@@ -251,6 +257,19 @@ class Card {
     public boolean hasHabilities() {
         return !EMPTY_HABILITIES.equals(abilities) || myHealthChange != 0 || opponentHealthChange != 0 || cardDraw != 0;
     }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Card card = (Card) o;
+        return instanceId == card.instanceId;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(instanceId);
+    }
 }
 
 class RoundParser {
@@ -360,7 +379,7 @@ class Summon extends Action {
 
 class Attack extends Action {
     public Attack(int id) {
-        super("ATTACK " + id);
+        super("ATTACK " + id + " -1");
     }
 
     public Attack(int id, int targetId) {
