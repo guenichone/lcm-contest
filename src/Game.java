@@ -1,4 +1,6 @@
 import java.util.*;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 class Player {
 
@@ -12,7 +14,7 @@ class Player {
 
         Scanner in = new Scanner(System.in);
 
-        LOG.debug("Game start ...");
+        LOG.info("Game start ...");
 
         Engine engine = new EfficiencyDraftEngine();
 
@@ -25,10 +27,10 @@ class Player {
 
             if (roundNumber == 30) {
                 LOG.info("Round 30 switching to game engine");
-                engine = new GameEngine(round.cardList);
+                engine = new GameEngine(((EfficiencyDraftEngine) engine).deck);
             }
 
-            LOG.debug("End of turn " + roundNumber);
+            LOG.info("End of turn " + roundNumber);
 
             roundNumber++;
         }
@@ -39,13 +41,15 @@ class EfficiencyDraftEngine implements Engine {
 
     private static final Channel CHANNEL = Channel.getInstance();
 
+    public List<Card> deck = new ArrayList<>();
+
     @Override
     public void processRound(Round round) {
         Card selectedCard = null;
         float maxEfficiency = Float.MAX_VALUE;
         int selectedIdx = -1;
         int idx = 0;
-        for (Card card : round.cardList) {
+        for (Card card : round.hand) {
             float costEfficiency = costEfficiency(card);
             if (costEfficiency < maxEfficiency) {
                 selectedCard = card;
@@ -56,7 +60,8 @@ class EfficiencyDraftEngine implements Engine {
         }
 
         CHANNEL.info("Picking card %s at idx %d", selectedCard.toString(), selectedIdx);
-        pickCard(selectedIdx);
+        deck.add(selectedCard);
+        CHANNEL.play(new Pick(selectedIdx));
     }
 
     public float costEfficiency(Card card) {
@@ -66,10 +71,6 @@ class EfficiencyDraftEngine implements Engine {
             return 1;
         }
     }
-
-    private static void pickCard(int number) {
-        System.out.println("PICK " + number);
-    }
 }
 
 class GameEngine implements Engine {
@@ -77,14 +78,7 @@ class GameEngine implements Engine {
     private static final Channel CHANNEL = Channel.getInstance();
 
     private List<Card> deck;
-
-    private List<Card> hand;
-
-    private List<Card> board = new ArrayList<>();
-    private List<Card> opponentBoard = new ArrayList<>();
-
-    private List<Card> graveyard = new ArrayList<>();
-    private List<Card> opponentGraveyard = new ArrayList<>();
+    private List<Card> summoningSickness = new ArrayList<>();
 
     public GameEngine(List<Card> deck) {
         this.deck = deck;
@@ -92,11 +86,8 @@ class GameEngine implements Engine {
 
     @Override
     public void processRound(Round round) {
-        this.hand = round.cardList;
-        this.hand.removeAll(board);
-
-        CHANNEL.info("Hand : %s", hand.toString());
-        CHANNEL.info("Board : %s", board.toString());
+        summoningSickness.clear();
+        deck.removeAll(round.hand);
 
         List<Action> actionList = new ArrayList<>();
 
@@ -121,15 +112,15 @@ class GameEngine implements Engine {
         List<Action> actionList = new ArrayList<>();
         int spentMana = 0;
 
-        // Remove already played cards
-        round.cardList.removeAll(board);
         // Sort decreasing cost order
-        round.cardList.sort(Comparator.comparingInt((Card o) -> o.cost).reversed());
+        round.hand.sort(Comparator.comparingInt((Card o) -> o.cost).reversed());
 
-        for (Card card : round.cardList) {
+        for (Card card : round.hand) {
             if (card.cost < round.current.playerMana - spentMana) {
                 spentMana += card.cost;
-                board.add(card);
+                if (!card.hasCharge()) {
+                    summoningSickness.add(card);
+                }
                 actionList.add(new Summon(card.instanceId));
             }
         }
@@ -138,13 +129,70 @@ class GameEngine implements Engine {
 
     private List<Action> bestAttackAction(Round round) {
         List<Action> actionList = new ArrayList<>();
-        // Banzai !
-        for (Card card : board) {
-            actionList.add(new Attack(card.instanceId));
+
+        // Remove invoked creatures from board
+        round.board.removeAll(summoningSickness);
+
+        // Get defensers
+        List<Card> defensers = getDefensers(round.opponentBoard);
+
+        if (defensers.isEmpty()) {
+            CHANNEL.info("No defensers ... banzai");
+            // Banzai !
+            for (Card card : round.board) {
+                actionList.add(new Attack(card.instanceId));
+            }
+        } else {
+            CHANNEL.info("Found defensers : %s", defensers.toString());
+            Map<Card, Integer> lifeMap = defensers.stream()
+                    .collect(Collectors.toMap(Function.identity(), Card::getDefense));
+
+            // Focus defensers
+            for (Card card : round.board) {
+                Card target = findBestTarget(card, lifeMap);
+                if (target != null) {
+                    actionList.add(new Attack(card.instanceId, target.instanceId));
+                } else {
+                    actionList.add(new Attack(card.instanceId));
+                }
+            }
         }
         return actionList;
     }
 
+    private Card findBestTarget(Card attacker, Map<Card, Integer> lifeMap) {
+        int maxDamage = 0;
+        Card target = null;
+        for (Map.Entry<Card, Integer> entry : lifeMap.entrySet()) {
+            if (entry.getValue() > 0 // Not dead yet
+                    && attacker.attack <= entry.getValue() // Deal no more damage
+                    && attacker.attack > maxDamage) { // Do more damage than previous one
+
+                maxDamage = attacker.attack;
+                target = entry.getKey();
+                entry.setValue(entry.getValue() - attacker.attack);
+            }
+        }
+
+        if (target == null) { // Maybe there will be no more defenser OR attack is greater than defense
+            for (Map.Entry<Card, Integer> entry : lifeMap.entrySet()) {
+                if (entry.getValue() > 0) {
+                    entry.setValue(entry.getValue() - attacker.attack);
+                    return entry.getKey();
+                }
+            }
+        }
+
+        return target;
+    }
+
+    private List<Card> getDefensers(List<Card> board) {
+        return board.stream().filter(Card::hasGuard).collect(Collectors.toList());
+    }
+
+    private List<Card> getBreakthrough(List<Card> board) {
+        return board.stream().filter(Card::hasBreakthrough).collect(Collectors.toList());
+    }
 }
 
 interface Engine {
@@ -158,14 +206,24 @@ class Round {
     public int opponentHand;
     public int cardCount;
 
-    public List<Card> cardList;
+    public List<Card> hand = new ArrayList<>();
+    public List<Card> board = new ArrayList<>();
+    public List<Card> opponentBoard = new ArrayList<>();
 
     public Round(PlayerStatus current, PlayerStatus opponent, int opponentHand, int cardCount, List<Card> cardList) {
         this.current = current;
         this.opponent = opponent;
         this.opponentHand = opponentHand;
         this.cardCount = cardCount;
-        this.cardList = cardList;
+        for (Card card : cardList) {
+            if (card.location == -1) {
+                opponentBoard.add(card);
+            } else if (card.location == 0) {
+                hand.add(card);
+            } else {
+                board.add(card);
+            }
+        }
     }
 
     @Override
@@ -174,7 +232,9 @@ class Round {
                 "\n- Opponent=" + opponent +
                 "\n- opponentHand=" + opponentHand +
                 "\n- cardCount=" + cardCount +
-                "\n- cardList=" + cardList;
+                "\n- hand=" + hand +
+                "\n- board=" + board +
+                "\n- opponentBoard=" + opponentBoard;
     }
 }
 
@@ -214,6 +274,9 @@ class Card {
     public int defense;
 
     public String abilities;
+    public boolean breakthrough = false;
+    public boolean guard = false;
+    public boolean charge = false;
 
     public int myHealthChange;
     public int opponentHealthChange;
@@ -230,6 +293,7 @@ class Card {
         this.defense = in.nextInt();
 
         this.abilities = in.next();
+        parseAbilities(this.abilities);
 
         this.myHealthChange = in.nextInt();
         this.opponentHealthChange = in.nextInt();
@@ -250,12 +314,34 @@ class Card {
         return result;
     }
 
+    private void parseAbilities(String abilities) {
+        this.breakthrough = abilities.charAt(0) == 'B';
+        this.charge = abilities.charAt(1) == 'C';
+        this.guard = abilities.charAt(3) == 'G';
+    }
+
     public String simpleString() {
         return String.format("[id%d; M%d, A%d, D%d]", instanceId, cost, attack, defense);
     }
 
     public boolean hasHabilities() {
         return !EMPTY_HABILITIES.equals(abilities) || myHealthChange != 0 || opponentHealthChange != 0 || cardDraw != 0;
+    }
+
+    public boolean hasGuard() {
+        return guard;
+    }
+
+    public boolean hasCharge() {
+        return charge;
+    }
+
+    public boolean hasBreakthrough() {
+        return breakthrough;
+    }
+
+    public int getDefense() {
+        return defense;
     }
 
     @Override
