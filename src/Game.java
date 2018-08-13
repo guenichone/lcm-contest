@@ -49,19 +49,27 @@ class EfficiencyDraftEngine implements Engine {
         float maxEfficiency = Float.MAX_VALUE;
         int selectedIdx = -1;
         int idx = 0;
+
         for (Card card : round.hand) {
-            float costEfficiency = costEfficiency(card);
-            if (costEfficiency < maxEfficiency) {
-                selectedCard = card;
-                maxEfficiency = costEfficiency;
-                selectedIdx = idx;
+            if (card.cardType == Card.CREATURE) {
+                float costEfficiency = costEfficiency(card);
+                if (costEfficiency < maxEfficiency) {
+                    selectedCard = card;
+                    maxEfficiency = costEfficiency;
+                    selectedIdx = idx;
+                }
             }
             idx++;
         }
 
-        CHANNEL.info("Picking card %s at idx %d", selectedCard.toString(), selectedIdx);
-        deck.add(selectedCard);
-        CHANNEL.play(new Pick(selectedIdx));
+        if (selectedCard != null) {
+            CHANNEL.info("Picking card %s at idx %d", selectedCard.toString(), selectedIdx);
+            deck.add(selectedCard);
+            CHANNEL.play(new Pick(selectedIdx));
+        } else {
+            CHANNEL.info("Only objects on this row ... we don't care !");
+            CHANNEL.play(new Pass());
+        }
     }
 
     public float costEfficiency(Card card) {
@@ -149,11 +157,13 @@ class GameEngine implements Engine {
 
             // Focus defensers
             for (Card card : round.board) {
-                Card target = findBestTarget(card, lifeMap);
-                if (target != null) {
-                    actionList.add(new Attack(card.instanceId, target.instanceId));
-                } else {
-                    actionList.add(new Attack(card.instanceId));
+                if (card.attack > 0) {
+                    Card target = findBestTarget(card, lifeMap);
+                    if (target != null) {
+                        actionList.add(new Attack(card.instanceId, target.instanceId));
+                    } else {
+                        actionList.add(new Attack(card.instanceId));
+                    }
                 }
             }
         }
@@ -262,6 +272,9 @@ class PlayerStatus {
 
 class Card {
 
+    public static final int CREATURE = 0;
+    public static final int ITEM = 3;
+
     private static final String EMPTY_HABILITIES = "------";
 
     public int cardNumber;
@@ -321,7 +334,7 @@ class Card {
     }
 
     public String simpleString() {
-        return String.format("[id%d; M%d, A%d, D%d]", instanceId, cost, attack, defense);
+        return String.format("[type%s, id%d, M%d, A%d, D%d]", cardType, instanceId, cost, attack, defense);
     }
 
     public boolean hasHabilities() {
