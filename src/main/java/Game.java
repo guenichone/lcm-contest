@@ -4,7 +4,7 @@ import java.util.stream.Collectors;
 
 class Player {
 
-    private static final Channel LOG = Channel.getInstance();
+    private static final Channel CHANNEL = Channel.getInstance();
 
     private static int roundNumber = 1;
 
@@ -14,23 +14,23 @@ class Player {
 
         Scanner in = new Scanner(System.in);
 
-        LOG.info("Game start ...");
+        CHANNEL.info("Game start ...");
 
         Engine engine = new EfficiencyDraftEngine();
 
         while (true) {
 
             Round round = RoundParser.parseRound(in);
-            LOG.info("Round status : %s", round);
+            CHANNEL.info("Round status : %s", round);
 
             engine.processRound(round);
 
             if (roundNumber == 30) {
-                LOG.info("Round 30 switching to game engine");
+                CHANNEL.info("Round 30 switching to game engine");
                 engine = new GameEngine(((EfficiencyDraftEngine) engine).deck);
             }
 
-            LOG.info("End of turn " + roundNumber);
+            CHANNEL.info("End of turn " + roundNumber);
 
             roundNumber++;
         }
@@ -46,14 +46,14 @@ class EfficiencyDraftEngine implements Engine {
     @Override
     public void processRound(Round round) {
         Card selectedCard = null;
-        float maxEfficiency = Float.MAX_VALUE;
+        float maxEfficiency = Float.MIN_VALUE;
         int selectedIdx = -1;
         int idx = 0;
 
         for (Card card : round.hand) {
             if (card.cardType == Card.CREATURE) {
                 float costEfficiency = costEfficiency(card);
-                if (costEfficiency < maxEfficiency) {
+                if (costEfficiency > maxEfficiency) {
                     selectedCard = card;
                     maxEfficiency = costEfficiency;
                     selectedIdx = idx;
@@ -63,7 +63,7 @@ class EfficiencyDraftEngine implements Engine {
         }
 
         if (selectedCard != null) {
-            CHANNEL.info("Picking card %s at idx %d", selectedCard.toString(), selectedIdx);
+            CHANNEL.info("Picking card %s at idx %d (%f)", selectedCard.toString(), selectedIdx, maxEfficiency);
             deck.add(selectedCard);
             CHANNEL.play(new Pick(selectedIdx));
         } else {
@@ -73,10 +73,22 @@ class EfficiencyDraftEngine implements Engine {
     }
 
     public float costEfficiency(Card card) {
-        if (!card.hasHabilities()) {
-            return (card.attack + card.defense) / card.cost;
+        if (card.isCreature()) {
+            float efficiency = (card.attack + card.defense) / Float.valueOf(Math.max(card.cost, 1));
+            if (card.hasLethal()) {
+                efficiency += 0.5;
+            }
+            if (card.hasGuard()) {
+                efficiency += 0.5;
+            }
+            if (card.hasWard()) {
+                efficiency += 0.5;
+            }
+
+            CHANNEL.info("Card %s efficiency %f", card, efficiency);
+            return efficiency;
         } else {
-            return 1;
+            return 0;
         }
     }
 }
@@ -124,7 +136,7 @@ class GameEngine implements Engine {
         round.hand.sort(Comparator.comparingInt((Card o) -> o.cost).reversed());
 
         for (Card card : round.hand) {
-            if (card.cost < round.current.playerMana - spentMana) {
+            if (card.cardType == Card.CREATURE && card.cost <= round.current.playerMana - spentMana) {
                 spentMana += card.cost;
                 if (!card.hasCharge()) {
                     summoningSickness.add(card);
@@ -144,33 +156,59 @@ class GameEngine implements Engine {
         // Get defensers
         List<Card> defensers = getDefensers(round.opponentBoard);
 
-        if (defensers.isEmpty()) {
-            CHANNEL.info("No defensers ... banzai");
-            // Banzai !
-            for (Card card : round.board) {
+        CHANNEL.info("Found defensers : %s", defensers.toString());
+        Map<Card, Integer> lifeMap = defensers.stream()
+                .collect(Collectors.toMap(Function.identity(), Card::getDefense));
+
+        List<Card> lethal = getLethals(round.board);
+        lethal.sort(Comparator.comparingInt(o -> o.attack)); // Sort by attack value
+        for (Card card : lethal) {
+            CHANNEL.info("Lethal creatures " + card);
+            Card target = findBestLethalTarget(card, lifeMap);
+            if (target != null) {
+                actionList.add(new Attack(card.instanceId, target.instanceId));
+            } else {
                 actionList.add(new Attack(card.instanceId));
             }
-        } else {
-            CHANNEL.info("Found defensers : %s", defensers.toString());
-            Map<Card, Integer> lifeMap = defensers.stream()
-                    .collect(Collectors.toMap(Function.identity(), Card::getDefense));
+        }
 
-            // Focus defensers
-            for (Card card : round.board) {
-                if (card.attack > 0) {
-                    Card target = findBestTarget(card, lifeMap);
-                    if (target != null) {
-                        actionList.add(new Attack(card.instanceId, target.instanceId));
-                    } else {
-                        actionList.add(new Attack(card.instanceId));
-                    }
+        // Focus defensers
+        round.board.removeAll(lethal);
+        for (Card card : round.board) {
+            if (card.attack > 0) {
+                Card target = findBestTarget(card, lifeMap);
+                if (target != null) {
+                    actionList.add(new Attack(card.instanceId, target.instanceId));
+                } else {
+                    actionList.add(new Attack(card.instanceId));
                 }
             }
         }
+
         return actionList;
     }
 
+    private Card findBestLethalTarget(Card attacker, Map<Card, Integer> lifeMap) {
+        int maxDefense = 0;
+        Card target = null;
+        for (Map.Entry<Card, Integer> entry : lifeMap.entrySet()) {
+            if (entry.getValue() > 0 && !entry.getKey().ward && entry.getKey().defense > maxDefense) {
+                maxDefense = entry.getKey().defense;
+                target = entry.getKey();
+                entry.setValue(0);
+            }
+        }
+
+        if (target == null) {
+            target = getDefaultTarget(attacker, lifeMap);
+        }
+
+        return target;
+    }
+
     private Card findBestTarget(Card attacker, Map<Card, Integer> lifeMap) {
+
+        // TODO Refactor me to calculate attack score taking into account if the card will die or not
         int maxDamage = 0;
         Card target = null;
         for (Map.Entry<Card, Integer> entry : lifeMap.entrySet()) {
@@ -184,20 +222,33 @@ class GameEngine implements Engine {
             }
         }
 
-        if (target == null) { // Maybe there will be no more defenser OR attack is greater than defense
-            for (Map.Entry<Card, Integer> entry : lifeMap.entrySet()) {
-                if (entry.getValue() > 0) {
-                    entry.setValue(entry.getValue() - attacker.attack);
-                    return entry.getKey();
-                }
-            }
+        if (target == null) {
+            target = getDefaultTarget(attacker, lifeMap);
         }
 
         return target;
     }
 
+    private Card getDefaultTarget(Card attacker, Map<Card, Integer> lifeMap) {
+        for (Map.Entry<Card, Integer> entry : lifeMap.entrySet()) {
+            if (entry.getValue() > 0) {
+                entry.setValue(entry.getValue() - attacker.attack);
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
     private List<Card> getDefensers(List<Card> board) {
         return board.stream().filter(Card::hasGuard).collect(Collectors.toList());
+    }
+
+    private List<Card> getLethals(List<Card> board) {
+        return board.stream().filter(Card::hasBreakthrough).collect(Collectors.toList());
+    }
+
+    private List<Card> getWards(List<Card> board) {
+        return board.stream().filter(Card::hasBreakthrough).collect(Collectors.toList());
     }
 
     private List<Card> getBreakthrough(List<Card> board) {
@@ -273,7 +324,9 @@ class PlayerStatus {
 class Card {
 
     public static final int CREATURE = 0;
-    public static final int ITEM = 3;
+    public static final int GREEN_ITEM = 1;
+    public static final int RARE_ITEM = 2;
+    public static final int BLUE_ITEM = 3;
 
     private static final String EMPTY_HABILITIES = "------";
 
@@ -287,9 +340,13 @@ class Card {
     public int defense;
 
     public String abilities;
+
     public boolean breakthrough = false;
-    public boolean guard = false;
     public boolean charge = false;
+    public boolean drain = false;
+    public boolean guard = false;
+    public boolean lethal = false;
+    public boolean ward = false;
 
     public int myHealthChange;
     public int opponentHealthChange;
@@ -330,7 +387,10 @@ class Card {
     private void parseAbilities(String abilities) {
         this.breakthrough = abilities.charAt(0) == 'B';
         this.charge = abilities.charAt(1) == 'C';
+        this.drain = abilities.charAt(2) == 'D';
         this.guard = abilities.charAt(3) == 'G';
+        this.lethal = abilities.charAt(4) == 'L';
+        this.ward = abilities.charAt(5) == 'W';
     }
 
     public String simpleString() {
@@ -341,20 +401,30 @@ class Card {
         return !EMPTY_HABILITIES.equals(abilities) || myHealthChange != 0 || opponentHealthChange != 0 || cardDraw != 0;
     }
 
-    public boolean hasGuard() {
-        return guard;
+    public boolean hasBreakthrough() {
+        return breakthrough;
     }
 
     public boolean hasCharge() {
         return charge;
     }
 
-    public boolean hasBreakthrough() {
-        return breakthrough;
+    public boolean hasDrain() { return drain; }
+
+    public boolean hasGuard() {
+        return guard;
     }
+
+    public boolean hasLethal() { return lethal; }
+
+    public boolean hasWard() { return ward; }
 
     public int getDefense() {
         return defense;
+    }
+
+    public boolean isCreature() {
+        return cardType == CREATURE;
     }
 
     @Override
